@@ -1,46 +1,298 @@
-import React, { useState } from 'react';
-import { Button } from './Button';
-import { Input } from './Input';
-import { Toast } from './Toast';
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { Button } from "./Button";
+import { Input } from "./Input";
+import { Toast } from "./Toast";
 
-interface WaitlistCardProps {
-  onSubmit?: (data: { firstName: string; lastName: string; email: string }) => Promise<void> | void;
+// Extend Window interface for Turnstile
+declare global {
+  interface Window {
+    turnstile?: {
+      render: (
+        container: string | HTMLElement,
+        options: {
+          sitekey: string;
+          callback?: (token: string) => void;
+          "error-callback"?: () => void;
+          "expired-callback"?: () => void;
+          theme?: "light" | "dark" | "auto";
+          size?: "normal" | "compact";
+          action?: string;
+        }
+      ) => string;
+      reset: (widgetId: string) => void;
+      remove: (widgetId: string) => void;
+    };
+  }
+}
+
+/**
+ * Form data structure matching Mailchimp field names
+ * - EMAIL: Email address
+ * - FNAME: First name
+ * - LNAME: Last name
+ * - cf-turnstile-response: Cloudflare Turnstile token (if enabled)
+ */
+export interface WaitlistFormData {
+  EMAIL: string;
+  FNAME: string;
+  LNAME: string;
+  "cf-turnstile-response"?: string;
+}
+
+export interface WaitlistCardProps {
+  // Content customization
+  title?: string;
+  subtitle?: string;
+  successTitle?: string;
+  successMessage?: string;
+
+  // ─────────────────────────────────────────
+  // UNCONTROLLED MODE (just actionUrl)
+  // ─────────────────────────────────────────
+  actionUrl?: string;
+
+  // ─────────────────────────────────────────
+  // CONTROLLED MODE
+  // ─────────────────────────────────────────
+  onSubmit?: (data: WaitlistFormData) => void;
+  isSuccess?: boolean;
+  isSubmitting?: boolean;
+  error?: string | null; // When set, displays error message in form
+
+  // Mailchimp specific
+  tags?: string; // Hidden tag value (e.g., "11843736")
+
+  // ─────────────────────────────────────────
+  // Cloudflare Turnstile
+  // ─────────────────────────────────────────
+  turnstileSiteKey?: string; // If provided, enables Turnstile verification
+  turnstileTheme?: "light" | "dark" | "auto";
+  turnstileSize?: "normal" | "compact";
+  turnstileAction?: string; // Optional action name for analytics
+  turnstileManaged?: boolean; // If true, hides widget (for managed/invisible mode)
+
+  // Modal behavior
+  dismissible?: boolean;
+
+  // Callbacks
+  onDone?: () => void;
+  onClose?: () => void;
 }
 
 export const WaitlistCard: React.FC<WaitlistCardProps> = ({
+  // Content props with defaults
+  title = "Join the Waitlist",
+  subtitle = "Be the first to know when we launch. Enter your details below to join our waitlist.",
+  successTitle = "You're on the list!",
+  successMessage = "Thank you for joining our waitlist. We'll notify you as soon as we launch.",
+
+  // Uncontrolled mode
+  actionUrl,
+
+  // Controlled mode
   onSubmit,
+  isSuccess: controlledIsSuccess,
+  isSubmitting: controlledIsSubmitting,
+  error: controlledError,
+
+  // Mailchimp specific
+  tags,
+
+  // Cloudflare Turnstile
+  turnstileSiteKey,
+  turnstileTheme = "auto",
+  turnstileSize = "normal",
+  turnstileAction,
+  turnstileManaged = false,
+
+  // Modal behavior
+  dismissible = false,
+
+  // Callbacks
+  onDone,
+  onClose,
 }) => {
-  const [firstName, setFirstName] = useState('');
-  const [lastName, setLastName] = useState('');
-  const [email, setEmail] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isSuccess, setIsSuccess] = useState(false);
+  // Determine if we're in controlled mode
+  const isControlled =
+    onSubmit !== undefined && controlledIsSuccess !== undefined;
+
+  // Internal state (used in uncontrolled mode)
+  const [internalIsSubmitting, setInternalIsSubmitting] = useState(false);
+  const [internalIsSuccess, setInternalIsSuccess] = useState(false);
+
+  // Form state using Mailchimp field names
+  const [FNAME, setFNAME] = useState("");
+  const [LNAME, setLNAME] = useState("");
+  const [EMAIL, setEMAIL] = useState("");
   const [showToast, setShowToast] = useState(false);
   const [errors, setErrors] = useState<{
-    firstName?: string;
-    lastName?: string;
-    email?: string;
+    FNAME?: string;
+    LNAME?: string;
+    EMAIL?: string;
+    turnstile?: string;
   }>({});
+
+  // Turnstile state
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const turnstileWidgetIdRef = useRef<string | null>(null);
+  const turnstileContainerRef = useRef<HTMLDivElement>(null);
+
+  // Ref for click outside detection
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  // Derive actual state based on mode
+  const isSubmitting = isControlled
+    ? controlledIsSubmitting ?? false
+    : internalIsSubmitting;
+  const isSuccess = isControlled ? controlledIsSuccess : internalIsSuccess;
+
+  // Turnstile callback handlers
+  const handleTurnstileSuccess = useCallback((token: string) => {
+    setTurnstileToken(token);
+    setErrors((prev) => ({ ...prev, turnstile: undefined }));
+  }, []);
+
+  const handleTurnstileError = useCallback(() => {
+    setTurnstileToken(null);
+    setErrors((prev) => ({
+      ...prev,
+      turnstile: "Verification failed. Please try again.",
+    }));
+  }, []);
+
+  const handleTurnstileExpired = useCallback(() => {
+    setTurnstileToken(null);
+  }, []);
+
+  // Initialize Turnstile widget
+  useEffect(() => {
+    if (!turnstileSiteKey || !turnstileContainerRef.current) return;
+
+    // Prevent duplicate widgets
+    if (turnstileWidgetIdRef.current) return;
+
+    let checkInterval: ReturnType<typeof setInterval> | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+
+    // Wait for Turnstile script to load
+    const initTurnstile = () => {
+      if (
+        window.turnstile &&
+        turnstileContainerRef.current &&
+        !turnstileWidgetIdRef.current
+      ) {
+        // Clear any existing content to prevent duplicates
+        turnstileContainerRef.current.innerHTML = "";
+
+        const widgetId = window.turnstile.render(
+          turnstileContainerRef.current,
+          {
+            sitekey: turnstileSiteKey,
+            callback: handleTurnstileSuccess,
+            "error-callback": handleTurnstileError,
+            "expired-callback": handleTurnstileExpired,
+            theme: turnstileTheme,
+            size: turnstileSize,
+            ...(turnstileAction && { action: turnstileAction }),
+          }
+        );
+        turnstileWidgetIdRef.current = widgetId;
+      }
+    };
+
+    // Check if Turnstile is already loaded
+    if (window.turnstile) {
+      initTurnstile();
+    } else {
+      // Wait for script to load
+      checkInterval = setInterval(() => {
+        if (window.turnstile) {
+          if (checkInterval) clearInterval(checkInterval);
+          initTurnstile();
+        }
+      }, 100);
+
+      // Cleanup interval after 10 seconds
+      timeout = setTimeout(() => {
+        if (checkInterval) clearInterval(checkInterval);
+      }, 10000);
+    }
+
+    // Cleanup widget on unmount
+    return () => {
+      if (checkInterval) clearInterval(checkInterval);
+      if (timeout) clearTimeout(timeout);
+      if (turnstileWidgetIdRef.current && window.turnstile) {
+        window.turnstile.remove(turnstileWidgetIdRef.current);
+        turnstileWidgetIdRef.current = null;
+      }
+    };
+  }, [
+    turnstileSiteKey,
+    turnstileTheme,
+    turnstileSize,
+    turnstileAction,
+    handleTurnstileSuccess,
+    handleTurnstileError,
+    handleTurnstileExpired,
+  ]);
+
+  // Handle click outside
+  useEffect(() => {
+    if (!dismissible) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (cardRef.current && !cardRef.current.contains(event.target as Node)) {
+        onClose?.();
+      }
+    };
+
+    const handleEscapeKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose?.();
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscapeKey);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscapeKey);
+    };
+  }, [dismissible, onClose]);
 
   const validateForm = () => {
     const newErrors: typeof errors = {};
 
-    if (!firstName.trim()) {
-      newErrors.firstName = 'First name is required';
+    if (!FNAME.trim()) {
+      newErrors.FNAME = "First name is required";
     }
 
-    if (!lastName.trim()) {
-      newErrors.lastName = 'Last name is required';
+    if (!LNAME.trim()) {
+      newErrors.LNAME = "Last name is required";
     }
 
-    if (!email.trim()) {
-      newErrors.email = 'Email address is required';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      newErrors.email = 'Please enter a valid email address';
+    if (!EMAIL.trim()) {
+      newErrors.EMAIL = "Email address is required";
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(EMAIL)) {
+      newErrors.EMAIL = "Please enter a valid email address";
+    }
+
+    // Validate Turnstile if enabled (skip validation in managed mode - token comes automatically)
+    if (turnstileSiteKey && !turnstileToken && !turnstileManaged) {
+      newErrors.turnstile = "Please complete the verification";
     }
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
+  };
+
+  const resetTurnstile = () => {
+    if (turnstileWidgetIdRef.current && window.turnstile) {
+      window.turnstile.reset(turnstileWidgetIdRef.current);
+      setTurnstileToken(null);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -50,35 +302,84 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
       return;
     }
 
-    setIsSubmitting(true);
+    const formData: WaitlistFormData = {
+      EMAIL,
+      FNAME,
+      LNAME,
+      ...(turnstileToken && { "cf-turnstile-response": turnstileToken }),
+    };
 
-    try {
-      if (onSubmit) {
-        await onSubmit({ firstName, lastName, email });
+    if (isControlled) {
+      // Controlled mode: just call onSubmit, consumer handles everything
+      onSubmit?.(formData);
+    } else {
+      // Uncontrolled mode: handle submission internally
+      setInternalIsSubmitting(true);
+
+      try {
+        if (actionUrl) {
+          // Build form data for submission
+          const submitData: Record<string, string> = {
+            EMAIL,
+            FNAME,
+            LNAME,
+          };
+
+          // Add tags if provided
+          if (tags) {
+            submitData.tags = tags;
+          }
+
+          // Add Turnstile token if available
+          if (turnstileToken) {
+            submitData["cf-turnstile-response"] = turnstileToken;
+          }
+
+          const response = await fetch(actionUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(submitData),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+        } else {
+          // Simulate API call delay if no actionUrl
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+
+        setInternalIsSuccess(true);
+        setShowToast(true);
+      } catch (error) {
+        console.error("Error submitting waitlist:", error);
+        // Reset Turnstile on error so user can try again
+        resetTurnstile();
+      } finally {
+        setInternalIsSubmitting(false);
       }
-      
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      setIsSuccess(true);
-      setShowToast(true);
-    } catch (error) {
-      console.error('Error submitting waitlist:', error);
-      // Handle error state if needed
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
-  const handleReset = () => {
+  const handleDone = () => {
     if (!isSubmitting) {
       // Reset form
-      setFirstName('');
-      setLastName('');
-      setEmail('');
+      setFNAME("");
+      setLNAME("");
+      setEMAIL("");
       setErrors({});
-      setIsSuccess(false);
+      resetTurnstile();
+
+      if (!isControlled) {
+        setInternalIsSuccess(false);
+      }
+
+      onDone?.();
     }
+  };
+
+  const handleClose = () => {
+    onClose?.();
   };
 
   return (
@@ -91,78 +392,156 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
           onClose={() => setShowToast(false)}
         />
       )}
-      <div className="bg-white rounded-2xl w-full max-w-md p-6 md:p-8 shadow-card border border-gray-200" style={{ borderColor: 'var(--color-black)' }}>
+      <div
+        ref={cardRef}
+        className="bg-white rounded-2xl w-full max-w-md p-6 md:p-8 shadow-card border border-gray-200 relative"
+        style={{ borderColor: "var(--color-black)" }}
+      >
+        {/* Close button (X icon) - shown when dismissible */}
+        {dismissible && (
+          <button
+            onClick={handleClose}
+            className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
+            aria-label="Close"
+          >
+            <svg
+              className="w-5 h-5 text-gray-500"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M6 18L18 6M6 6l12 12"
+              />
+            </svg>
+          </button>
+        )}
+
         {!isSuccess ? (
           <>
             {/* Title */}
-            <h2 className="text-2xl font-semibold text-black mb-3">
-              Join the Waitlist
-            </h2>
+            <h2 className="text-2xl font-semibold text-black mb-3">{title}</h2>
 
             {/* Body */}
-            <p className="text-base text-gray-600 mb-6">
-              Be the first to know when we launch. Enter your details below to join our waitlist.
-            </p>
+            <p className="text-base text-gray-600 mb-6">{subtitle}</p>
 
-            {/* Form */}
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <Input
-                label="First Name"
-                type="text"
-                value={firstName}
-                onChange={(e) => {
-                  setFirstName(e.target.value);
-                  if (errors.firstName) {
-                    setErrors(prev => ({ ...prev, firstName: undefined }));
-                  }
-                }}
-                placeholder="Enter your first name"
-                required
-                error={errors.firstName}
-                autoComplete="given-name"
-              />
-
-              <Input
-                label="Last Name"
-                type="text"
-                value={lastName}
-                onChange={(e) => {
-                  setLastName(e.target.value);
-                  if (errors.lastName) {
-                    setErrors(prev => ({ ...prev, lastName: undefined }));
-                  }
-                }}
-                placeholder="Enter your last name"
-                required
-                error={errors.lastName}
-                autoComplete="family-name"
-              />
-
+            {/* Form - IDs and names match Mailchimp embed */}
+            <form
+              onSubmit={handleSubmit}
+              className="space-y-4"
+              id="mc-embedded-subscribe-form"
+              name="mc-embedded-subscribe-form"
+            >
+              {/* Email field - Mailchimp expects EMAIL first in their schema */}
               <Input
                 label="Email Address"
                 type="email"
-                value={email}
+                id="mce-EMAIL"
+                name="EMAIL"
+                value={EMAIL}
                 onChange={(e) => {
-                  setEmail(e.target.value);
-                  if (errors.email) {
-                    setErrors(prev => ({ ...prev, email: undefined }));
+                  setEMAIL(e.target.value);
+                  if (errors.EMAIL) {
+                    setErrors((prev) => ({ ...prev, EMAIL: undefined }));
                   }
                 }}
                 placeholder="Enter your email address"
                 required
-                error={errors.email}
+                error={errors.EMAIL}
                 autoComplete="email"
               />
+
+              {/* First Name field */}
+              <Input
+                label="First Name"
+                type="text"
+                id="mce-FNAME"
+                name="FNAME"
+                value={FNAME}
+                onChange={(e) => {
+                  setFNAME(e.target.value);
+                  if (errors.FNAME) {
+                    setErrors((prev) => ({ ...prev, FNAME: undefined }));
+                  }
+                }}
+                placeholder="Enter your first name"
+                required
+                error={errors.FNAME}
+                autoComplete="given-name"
+              />
+
+              {/* Last Name field */}
+              <Input
+                label="Last Name"
+                type="text"
+                id="mce-LNAME"
+                name="LNAME"
+                value={LNAME}
+                onChange={(e) => {
+                  setLNAME(e.target.value);
+                  if (errors.LNAME) {
+                    setErrors((prev) => ({ ...prev, LNAME: undefined }));
+                  }
+                }}
+                placeholder="Enter your last name"
+                required
+                error={errors.LNAME}
+                autoComplete="family-name"
+              />
+
+              {/* Hidden tags field (if provided) */}
+              {tags && <input type="hidden" name="tags" value={tags} />}
+
+              {/* Cloudflare Turnstile Widget */}
+              {turnstileSiteKey && (
+                <div className={turnstileManaged ? "sr-only" : "pt-2"}>
+                  <div
+                    ref={turnstileContainerRef}
+                    className="cf-turnstile flex justify-center"
+                  />
+                  {!turnstileManaged && errors.turnstile && (
+                    <p className="mt-2 text-sm text-red-500 text-center">
+                      {errors.turnstile}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Response containers (matching Mailchimp) */}
+              <div id="mce-responses" className="hidden">
+                <div id="mce-error-response" style={{ display: "none" }}></div>
+                <div
+                  id="mce-success-response"
+                  style={{ display: "none" }}
+                ></div>
+              </div>
+
+              {/* Controlled mode error display */}
+              {controlledError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                  <p className="text-sm text-red-600 text-center">
+                    {controlledError}
+                  </p>
+                </div>
+              )}
 
               <div className="pt-2">
                 <Button
                   type="submit"
+                  id="mc-embedded-subscribe"
+                  name="subscribe"
                   variant="primary"
                   isLoading={isSubmitting}
-                  disabled={isSubmitting}
+                  disabled={
+                    isSubmitting ||
+                    (!!turnstileSiteKey && !turnstileToken && !turnstileManaged)
+                  }
                   className="w-full"
                 >
-                  {isSubmitting ? 'Submitting...' : 'Join Waitlist'}
+                  {isSubmitting ? "Submitting..." : "Join Waitlist"}
                 </Button>
               </div>
             </form>
@@ -188,20 +567,14 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
 
             {/* Success Title */}
             <h2 className="text-2xl font-semibold text-black mb-3">
-              You're on the list!
+              {successTitle}
             </h2>
 
             {/* Success Message */}
-            <p className="text-base text-gray-600 mb-6">
-              Thank you for joining our waitlist. We'll notify you as soon as we launch.
-            </p>
+            <p className="text-base text-gray-600 mb-6">{successMessage}</p>
 
-            {/* Reset Button */}
-            <Button
-              onClick={handleReset}
-              variant="primary"
-              className="w-full"
-            >
+            {/* Done Button */}
+            <Button onClick={handleDone} variant="primary" className="w-full">
               Done
             </Button>
           </div>
@@ -213,4 +586,3 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
 
 // Keep the old export name for backwards compatibility
 export const WaitlistModal = WaitlistCard;
-
