@@ -8,6 +8,7 @@ A configurable React waitlist modal component with Mailchimp and Cloudflare Turn
 - 🔄 **Controlled & Uncontrolled Modes** - Use with or without external state management
 - 📧 **Mailchimp Compatible** - Form fields match Mailchimp's expected schema
 - 🛡️ **Cloudflare Turnstile** - Built-in spam protection with visible or managed modes
+- 🍯 **Honeypot Protection** - Alternative spam protection using hidden form fields
 - ❌ **Dismissible Modal** - Optional X button and click-outside-to-close
 - 📱 **Mobile-First Design** - Optimized for touch interactions
 - 🎯 **TypeScript** - Full type definitions included
@@ -145,7 +146,7 @@ For backend-managed Turnstile verification:
 <WaitlistCard
   title="Join the Waitlist"
   turnstileSiteKey="your-site-key"
-  turnstileManaged={true}  // Hides the widget
+  turnstileManaged={true} // Hides the widget
   onSubmit={handleSubmit}
   isSubmitting={isSubmitting}
   isSuccess={isSuccess}
@@ -202,60 +203,187 @@ export async function onRequestPost({ request, env }) {
 ></script>
 ```
 
+## Honeypot Integration
+
+Honeypot is a lightweight spam protection alternative to Turnstile. It uses a hidden form field that bots typically fill but humans won't see.
+
+### Uncontrolled Mode with Honeypot
+
+```tsx
+<WaitlistCard
+  title="Join the Waitlist"
+  subtitle="Enter your details below."
+  honeypotFieldName="b_eecb4f508c0388d7720a99c82_0ad1109319" // Your honeypot field name
+  actionUrl="https://your-api.com/subscribe"
+  onDone={() => console.log("Success!")}
+/>
+```
+
+### Controlled Mode with Honeypot
+
+```tsx
+import { WaitlistCard, WaitlistFormData } from "godgpt-web-waitlist";
+
+function App() {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSuccess, setIsSuccess] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const honeypotFieldName = "b_eecb4f508c0388d7720a99c82_0ad1109319";
+
+  const handleSubmit = async (data: WaitlistFormData) => {
+    // Check honeypot field
+    const honeypotValue = data[honeypotFieldName];
+
+    // If honeypot is filled, it's a bot - silently reject
+    if (honeypotValue && honeypotValue.trim()) {
+      console.log("Bot detected - honeypot field was filled");
+      return; // Don't process, don't show error
+    }
+
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          EMAIL: data.EMAIL,
+          FNAME: data.FNAME,
+          LNAME: data.LNAME,
+          // Include honeypot value for backend verification
+          [honeypotFieldName]: honeypotValue || "",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Subscription failed");
+      }
+
+      setIsSuccess(true);
+    } catch (err) {
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <WaitlistCard
+      title="Join the Waitlist"
+      honeypotFieldName={honeypotFieldName}
+      onSubmit={handleSubmit}
+      isSubmitting={isSubmitting}
+      isSuccess={isSuccess}
+      error={error}
+      onDone={() => setIsSuccess(false)}
+    />
+  );
+}
+```
+
+### Backend Verification
+
+Always verify the honeypot on your backend:
+
+```typescript
+// Example: Cloudflare Pages Function
+export async function onRequestPost({ request, env }) {
+  const formData = await request.json();
+
+  const honeypotFieldName = "b_eecb4f508c0388d7720a99c82_0ad1109319";
+  const honeypotValue = formData[honeypotFieldName];
+
+  // If honeypot is filled, it's a bot - reject silently
+  if (honeypotValue && honeypotValue.trim()) {
+    // Return success to bot (don't reveal it's a honeypot)
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Process legitimate submission
+  const { EMAIL, FNAME, LNAME } = formData;
+
+  // Add to Mailchimp or your database
+  // ...
+
+  return new Response(JSON.stringify({ success: true }), {
+    status: 200,
+  });
+}
+```
+
+### How Honeypot Works
+
+1. **Hidden Field**: The honeypot field is visually hidden using CSS (`position: absolute; left: -5000px`)
+2. **Bot Detection**: Bots typically fill all form fields, including hidden ones
+3. **Silent Rejection**: If the honeypot field is filled, the submission is rejected silently (no error shown)
+4. **Backend Check**: Always verify on your backend as well for additional security
+
+**Note:** The honeypot field name should match your Mailchimp embed form or your custom backend field name.
+
 ## Props
 
 ### Content
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `title` | `string` | `"Join the Waitlist"` | Modal title |
-| `subtitle` | `string` | `"Be the first to know..."` | Description text |
-| `successTitle` | `string` | `"You're on the list!"` | Success state title |
+| Prop             | Type     | Default                      | Description           |
+| ---------------- | -------- | ---------------------------- | --------------------- |
+| `title`          | `string` | `"Join the Waitlist"`        | Modal title           |
+| `subtitle`       | `string` | `"Be the first to know..."`  | Description text      |
+| `successTitle`   | `string` | `"You're on the list!"`      | Success state title   |
 | `successMessage` | `string` | `"Thank you for joining..."` | Success state message |
 
 ### Uncontrolled Mode
 
-| Prop | Type | Description |
-|------|------|-------------|
+| Prop        | Type     | Description              |
+| ----------- | -------- | ------------------------ |
 | `actionUrl` | `string` | URL to POST form data to |
 
 ### Controlled Mode
 
-| Prop | Type | Description |
-|------|------|-------------|
-| `onSubmit` | `(data: WaitlistFormData) => void` | Called with form data on submit |
-| `isSubmitting` | `boolean` | Shows loading state |
-| `isSuccess` | `boolean` | Shows success state |
-| `error` | `string \| null` | Error message to display |
+| Prop           | Type                               | Description                     |
+| -------------- | ---------------------------------- | ------------------------------- |
+| `onSubmit`     | `(data: WaitlistFormData) => void` | Called with form data on submit |
+| `isSubmitting` | `boolean`                          | Shows loading state             |
+| `isSuccess`    | `boolean`                          | Shows success state             |
+| `error`        | `string \| null`                   | Error message to display        |
 
 ### Mailchimp
 
-| Prop | Type | Description |
-|------|------|-------------|
+| Prop   | Type     | Description                    |
+| ------ | -------- | ------------------------------ |
 | `tags` | `string` | Hidden tag value for Mailchimp |
 
 ### Cloudflare Turnstile
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `turnstileSiteKey` | `string` | - | Enables Turnstile verification |
-| `turnstileTheme` | `"light" \| "dark" \| "auto"` | `"auto"` | Widget theme |
-| `turnstileSize` | `"normal" \| "compact"` | `"normal"` | Widget size |
-| `turnstileAction` | `string` | - | Action name for analytics |
-| `turnstileManaged` | `boolean` | `false` | Hide widget (invisible mode) |
+| Prop               | Type                          | Default    | Description                    |
+| ------------------ | ----------------------------- | ---------- | ------------------------------ |
+| `turnstileSiteKey` | `string`                      | -          | Enables Turnstile verification |
+| `turnstileTheme`   | `"light" \| "dark" \| "auto"` | `"auto"`   | Widget theme                   |
+| `turnstileSize`    | `"normal" \| "compact"`       | `"normal"` | Widget size                    |
+| `turnstileAction`  | `string`                      | -          | Action name for analytics      |
+| `turnstileManaged` | `boolean`                     | `false`    | Hide widget (invisible mode)   |
+
+### Honeypot
+
+| Prop                | Type     | Description                                                        |
+| ------------------- | -------- | ------------------------------------------------------------------ |
+| `honeypotFieldName` | `string` | Name attribute for the honeypot field (e.g., Mailchimp field name) |
 
 ### Modal Behavior
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
+| Prop          | Type      | Default | Description                        |
+| ------------- | --------- | ------- | ---------------------------------- |
 | `dismissible` | `boolean` | `false` | Show X button, allow click-outside |
 
 ### Callbacks
 
-| Prop | Type | Description |
-|------|------|-------------|
-| `onDone` | `() => void` | Called when user clicks "Done" on success |
-| `onClose` | `() => void` | Called when modal is dismissed |
+| Prop      | Type         | Description                               |
+| --------- | ------------ | ----------------------------------------- |
+| `onDone`  | `() => void` | Called when user clicks "Done" on success |
+| `onClose` | `() => void` | Called when modal is dismissed            |
 
 ## Form Data Structure
 
@@ -265,8 +393,11 @@ interface WaitlistFormData {
   FNAME: string;
   LNAME: string;
   "cf-turnstile-response"?: string; // Present if Turnstile enabled
+  [key: string]: string | undefined; // Dynamic fields (e.g., honeypot field)
 }
 ```
+
+**Note:** When using honeypot, the field name will be whatever you pass to `honeypotFieldName`. For example, if `honeypotFieldName="b_eecb4f508c0388d7720a99c82_0ad1109319"`, then `data["b_eecb4f508c0388d7720a99c82_0ad1109319"]` will contain the honeypot value.
 
 ## Exports
 
