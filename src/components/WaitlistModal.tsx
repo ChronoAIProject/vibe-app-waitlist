@@ -31,12 +31,14 @@ declare global {
  * - FNAME: First name
  * - LNAME: Last name
  * - cf-turnstile-response: Cloudflare Turnstile token (if enabled)
+ * - [honeypotFieldName]: Honeypot field value (if enabled)
  */
 export interface WaitlistFormData {
   EMAIL: string;
   FNAME: string;
   LNAME: string;
   "cf-turnstile-response"?: string;
+  [key: string]: string | undefined; // Allow dynamic honeypot field name
 }
 
 export interface WaitlistCardProps {
@@ -61,6 +63,11 @@ export interface WaitlistCardProps {
 
   // Mailchimp specific
   tags?: string; // Hidden tag value (e.g., "11843736")
+
+  // ─────────────────────────────────────────
+  // Honeypot (Alternative to Turnstile)
+  // ─────────────────────────────────────────
+  honeypotFieldName?: string; // If provided, adds a honeypot field for spam protection
 
   // ─────────────────────────────────────────
   // Cloudflare Turnstile
@@ -98,6 +105,9 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
   // Mailchimp specific
   tags,
 
+  // Honeypot
+  honeypotFieldName,
+
   // Cloudflare Turnstile
   turnstileSiteKey,
   turnstileTheme = "auto",
@@ -131,6 +141,9 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
     EMAIL?: string;
     turnstile?: string;
   }>({});
+
+  // Honeypot state
+  const [honeypotValue, setHoneypotValue] = useState("");
 
   // Turnstile state
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
@@ -263,6 +276,11 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
   }, [dismissible, onClose]);
 
   const validateForm = () => {
+    // Honeypot check: if field is filled, it's a bot - silently reject
+    if (honeypotFieldName && honeypotValue.trim()) {
+      return false; // Silently reject bots
+    }
+
     const newErrors: typeof errors = {};
 
     if (!FNAME.trim()) {
@@ -307,6 +325,7 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
       FNAME,
       LNAME,
       ...(turnstileToken && { "cf-turnstile-response": turnstileToken }),
+      ...(honeypotFieldName && { [honeypotFieldName]: honeypotValue }),
     };
 
     if (isControlled) {
@@ -333,6 +352,11 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
           // Add Turnstile token if available
           if (turnstileToken) {
             submitData["cf-turnstile-response"] = turnstileToken;
+          }
+
+          // Add honeypot field if enabled
+          if (honeypotFieldName) {
+            submitData[honeypotFieldName] = honeypotValue;
           }
 
           const response = await fetch(actionUrl, {
@@ -367,6 +391,7 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
       setFNAME("");
       setLNAME("");
       setEMAIL("");
+      setHoneypotValue("");
       setErrors({});
       resetTurnstile();
 
@@ -494,6 +519,30 @@ export const WaitlistCard: React.FC<WaitlistCardProps> = ({
 
               {/* Hidden tags field (if provided) */}
               {tags && <input type="hidden" name="tags" value={tags} />}
+
+              {/* Honeypot field (spam protection) */}
+              {honeypotFieldName && (
+                <div
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    left: "-5000px",
+                    width: "1px",
+                    height: "1px",
+                    overflow: "hidden",
+                  }}
+                >
+                  <input
+                    type="text"
+                    name={honeypotFieldName}
+                    value={honeypotValue}
+                    onChange={(e) => setHoneypotValue(e.target.value)}
+                    tabIndex={-1}
+                    autoComplete="off"
+                    aria-label=""
+                  />
+                </div>
+              )}
 
               {/* Cloudflare Turnstile Widget */}
               {turnstileSiteKey && (

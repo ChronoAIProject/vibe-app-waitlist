@@ -10,7 +10,8 @@ type DemoMode =
   | "dismissible"
   | "turnstile"
   | "managed-success"
-  | "managed-error";
+  | "managed-error"
+  | "honeypot";
 
 export const WaitlistScreen: React.FC = () => {
   // Demo mode selector
@@ -77,6 +78,29 @@ export const WaitlistScreen: React.FC = () => {
     setIsSubmitting(false);
     setError("Verification failed. Please try again.");
     console.log("Backend returned error");
+  };
+
+  // Handle Honeypot submission
+  const handleHoneypotSubmit = async (data: WaitlistFormData) => {
+    console.log("Honeypot submission:", data);
+    const honeypotField = "b_eecb4f508c0388d7720a99c82_0ad1109319";
+    const honeypotValue = data[honeypotField];
+    
+    if (honeypotValue && honeypotValue.trim()) {
+      console.log("⚠️ Bot detected! Honeypot field was filled:", honeypotValue);
+      // Silently reject - don't show error to user
+      return;
+    }
+    
+    console.log("✅ Human user - honeypot field is empty");
+    setIsSubmitting(true);
+    setError(null);
+
+    // Simulate API call
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    setIsSubmitting(false);
+    setIsSuccess(true);
   };
 
   // Reset controlled state
@@ -198,6 +222,21 @@ export const WaitlistScreen: React.FC = () => {
         >
           Managed ✗
         </button>
+        <button
+          onClick={() => {
+            setMode("honeypot");
+            setIsVisible(true);
+            setIsSuccess(false);
+            setError(null);
+          }}
+          className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+            mode === "honeypot"
+              ? "bg-purple-600 text-white"
+              : "bg-white text-purple-600 border border-purple-600"
+          }`}
+        >
+          Honeypot
+        </button>
       </div>
 
       {/* Mode Description */}
@@ -246,6 +285,13 @@ export const WaitlistScreen: React.FC = () => {
             failed backend verification → shows{" "}
             <code className="bg-gray-200 px-1 rounded">error</code> prop, stays
             on form.
+          </p>
+        )}
+        {mode === "honeypot" && (
+          <p className="text-sm text-gray-600">
+            <strong>Honeypot Mode:</strong> Alternative spam protection. Hidden
+            field that bots fill but humans don't see. Check console to see bot
+            detection.
           </p>
         )}
       </div>
@@ -346,6 +392,23 @@ export const WaitlistScreen: React.FC = () => {
           turnstileSiteKey="1x00000000000000000000AA"
           turnstileManaged={true}
           onSubmit={handleManagedError}
+          isSubmitting={isSubmitting}
+          isSuccess={isSuccess}
+          error={error}
+          onDone={handleControlledDone}
+        />
+      )}
+
+      {/* Waitlist Card - Honeypot */}
+      {mode === "honeypot" && isVisible && (
+        <WaitlistCard
+          title="Join the Waitlist"
+          subtitle="Be the first to know when we launch. Enter your details below."
+          successTitle="You're on the list!"
+          successMessage="Thank you for joining. We'll notify you when we launch."
+          // Honeypot field name (matches Mailchimp format)
+          honeypotFieldName="b_eecb4f508c0388d7720a99c82_0ad1109319"
+          onSubmit={handleHoneypotSubmit}
           isSubmitting={isSubmitting}
           isSuccess={isSuccess}
           error={error}
