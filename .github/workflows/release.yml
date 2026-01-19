@@ -9,7 +9,6 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  id-token: write # Required for npm trusted publishing (OIDC)
   contents: read # Required for checking out the repository
 
 jobs:
@@ -26,15 +25,14 @@ jobs:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
 
-      # npm 11.5.1+ required for trusted publishing
-      - name: Update npm
-        run: npm install -g npm@latest
-
       - name: Install Dependencies
         run: npm ci
 
       - name: Build
         run: npm run build:lib
 
-      - name: Publish to npm using Trusted Publisher
-        run: npm publish --provenance --access public
+      - name: Authenticate with npm
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
+      - name: Publish to npm
+        run: npm publish --access public
