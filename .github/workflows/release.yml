@@ -4,12 +4,13 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # Allows manual triggering from GitHub Actions tab
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  contents: read # Required for checking out the repository
+  id-token: write # Required for npm trusted publishing (OIDC)
+  contents: write # Required for creating releases and PRs
+  pull-requests: write # Required for changesets to create PRs
 
 jobs:
   release:
@@ -19,20 +20,35 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 10
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: "pnpm"
           registry-url: "https://registry.npmjs.org"
 
+      # npm 11.5.1+ required for trusted publishing
+      - name: Update npm
+        run: npm install -g npm@latest
+
       - name: Install Dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: npm run build:lib
+        run: pnpm build
 
-      - name: Authenticate with npm
-        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
-
-      - name: Publish to npm
-        run: npm publish --access public
+      - name: Create Release Pull Request or Publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          publish: pnpm release
+          version: pnpm version-packages
+          title: "chore: version packages"
+          commit: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
